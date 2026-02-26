@@ -6,6 +6,9 @@ import { useFirebaseRide } from '../hooks/useFirebaseRide';
 import { useUserProfile } from '../hooks/useUserProfile';
 import { calculatePriceWithStops, getCarTypePrice } from '../utils/priceCalculation';
 import { useRideContext } from '../contexts/RideContext';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { database } from '../config/firebase';
+import { addDoc, collection } from 'firebase/firestore';
 
 interface ConfirmOrderProps {
   destination: string;
@@ -28,19 +31,30 @@ export const ConfirmOrder: React.FC<ConfirmOrderProps> = ({
   onRideConfirmed,
   onRideCreated,
 }) => {
+  const navigate = useNavigate();
+  const location = useLocation();
   const [isLoading, setIsLoading] = useState(false);
   const { profile } = useUserProfile();
   const { createRide } = useFirebaseRide();
   const { isRideActive } = useRideContext();
-  
-  // Recalculate price to ensure consistency
-  const priceCalculation = calculatePriceWithStops(pickup, destination, stops);
-  const finalPrice = getCarTypePrice(priceCalculation.totalPrice, carType);
+
+  const { orderType = 'ride', orderData = {} } = location.state || {};
+
+  const isFood = orderType === 'food';
+
+  const finalDestination = isFood ? orderData.destinationAddress : destination;
+  const finalPickup = isFood ? orderData.pickupAddress : pickup;
+  const finalStops = isFood ? (orderData.stops || []) : stops;
+  const finalCarType = isFood ? orderData.deliveryMode?.label : carType;
+  const finalPrice = isFood ? orderData.totalPrice : price;
+
+  const priceCalculation = !isFood ? calculatePriceWithStops(pickup, destination, stops) : null;
+  const displayPrice = isFood ? finalPrice : (priceCalculation ? getCarTypePrice(priceCalculation.totalPrice, carType) : finalPrice);
 
   const handleConfirmOrder = async () => {
     if (isLoading || isRideActive) {
       if (isRideActive) {
-        alert('You already have an active ride.');
+        alert('You already have an active order.');
       }
       return;
     }
@@ -48,26 +62,63 @@ export const ConfirmOrder: React.FC<ConfirmOrderProps> = ({
     setIsLoading(true);
 
     try {
-      const rideRequest = {
-        pickup,
-        destination,
-        stops: stops || [],
-        carType,
-        price: finalPrice,
-        status: 'pending' as const,
-        userId: profile?.id || 'user123',
-        userName: profile?.name || 'Unknown User'
-      };
+      if (isFood) {
+        const foodOrder = {
+          type: 'food',
+          deliveryMode: orderData.deliveryMode,
+          pickupAddress: orderData.pickupAddress,
+          destinationAddress: orderData.destinationAddress,
+          stops: orderData.stops || [],
+          items: orderData.items || [],
+          foodSubtotal: orderData.foodSubtotal,
+          deliveryFee: orderData.deliveryFee,
+          totalPrice: orderData.totalPrice,
+          status: 'pending',
+          timestamp: Date.now(),
+          userId: profile?.id || 'user123',
+          userName: profile?.name || 'Unknown User'
+        };
 
-      const rideId = await createRide(rideRequest);
+        const docRef = await addDoc(collection(database, 'foodOrders'), foodOrder);
+        const foodOrderId = docRef.id;
 
-      onRideCreated(rideId);
+        localStorage.setItem('currentFoodOrderId', foodOrderId);
+        localStorage.setItem('currentOrderType', 'food');
 
-      onRideConfirmed();
+        navigate('/waiting-for-driver', {
+          state: {
+            orderType: 'food',
+            requestId: foodOrderId,
+            orderData: foodOrder
+          }
+        });
+      } else {
+        const rideRequest = {
+          pickup: finalPickup,
+          destination: finalDestination,
+          stops: finalStops || [],
+          carType: finalCarType,
+          price: displayPrice,
+          status: 'pending' as const,
+          userId: profile?.id || 'user123',
+          userName: profile?.name || 'Unknown User'
+        };
 
+        const rideId = await createRide(rideRequest);
+
+        onRideCreated(rideId);
+
+        navigate('/waiting-for-driver', {
+          state: {
+            orderType: 'ride',
+            requestId: rideId,
+            orderData: rideRequest
+          }
+        });
+      }
     } catch (error) {
-      console.error('Failed to create ride request:', error);
-      onRideConfirmed();
+      console.error('Failed to create order:', error);
+      alert('Failed to create order. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -77,7 +128,6 @@ export const ConfirmOrder: React.FC<ConfirmOrderProps> = ({
     <div className="min-h-screen relative overflow-hidden">
       <MapBackground />
 
-      {/* Header */}
       <AnimatePresence>
         {!isLoading && (
           <motion.div
@@ -97,7 +147,6 @@ export const ConfirmOrder: React.FC<ConfirmOrderProps> = ({
         )}
       </AnimatePresence>
 
-      {/* ETA info */}
       <motion.div
         className="absolute top-24 left-1/2 transform -translate-x-1/2 z-10"
         initial={{ scale: 0, opacity: 0 }}
@@ -112,36 +161,99 @@ export const ConfirmOrder: React.FC<ConfirmOrderProps> = ({
         </div>
       </motion.div>
 
-      {/* Bottom confirmation panel */}
       <motion.div
-        className="fixed bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-2xl p-6 z-20"
+        className="fixed bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-2xl p-6 z-20 max-h-[80vh] overflow-y-auto"
         initial={{ y: 200, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
         transition={{ type: "spring", damping: 25, stiffness: 200, delay: 0.2 }}
       >
         <div className="space-y-6">
-          <div className="text-center">
-            <h2 className="text-2xl font-bold text-gray-900">{destination}</h2>
-            {stops.length > 0 && (
-              <div className="mt-2">
-                <p className="text-sm text-gray-600">via {stops.length} stop{stops.length > 1 ? 's' : ''}</p>
-                <div className="text-xs text-gray-500 mt-1">
-                  {stops.map((stop, index) => (
-                    <span key={index}>
-                      {stop}{index < stops.length - 1 ? ' → ' : ''}
-                    </span>
-                  ))}
+          {isFood ? (
+            <>
+              <div className="text-center">
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">{orderData.deliveryMode?.label}</h2>
+                <p className="text-gray-600">{orderData.deliveryMode?.description}</p>
+                <p className="text-sm text-gray-500">{orderData.deliveryMode?.time}</p>
+              </div>
+
+              <div className="bg-gray-50 rounded-xl p-4">
+                <h3 className="font-semibold text-gray-900 mb-3">Delivery Details</h3>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">From:</span>
+                    <span className="text-gray-900 font-medium">{orderData.pickupAddress}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">To:</span>
+                    <span className="text-gray-900 font-medium">{orderData.destinationAddress}</span>
+                  </div>
+                  {orderData.stops && orderData.stops.length > 0 && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Stops:</span>
+                      <span className="text-gray-900 font-medium">{orderData.stops.length}</span>
+                    </div>
+                  )}
                 </div>
               </div>
-            )}
-            <div className="flex items-center justify-center space-x-4 mt-4">
-              <span className="text-lg font-medium text-gray-700">{carType}</span>
-              <span className="text-2xl font-bold text-gray-900">R {finalPrice}</span>
-            </div>
-            <div className="text-sm text-gray-500 mt-2">
-              {priceCalculation.totalDistance}km total distance
-            </div>
-          </div>
+
+              {orderData.items && orderData.items.length > 0 && (
+                <div className="bg-gray-50 rounded-xl p-4">
+                  <h3 className="font-semibold text-gray-900 mb-3">Food Items</h3>
+                  <div className="space-y-2 max-h-32 overflow-y-auto">
+                    {orderData.items.map((item: any, idx: number) => (
+                      <div key={idx} className="flex justify-between text-sm">
+                        <span className="text-gray-700">{item.name}</span>
+                        <span className="font-medium text-gray-900">R {item.price}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-gray-50 rounded-xl p-4 space-y-2">
+                <h3 className="font-semibold text-gray-900 mb-3">Payment Summary</h3>
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600">Food subtotal</span>
+                  <span className="font-medium text-gray-900">R {orderData.foodSubtotal}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-gray-600">Delivery fee</span>
+                  <span className="font-medium text-gray-900">R {orderData.deliveryFee}</span>
+                </div>
+                <div className="flex justify-between pt-2 border-t border-gray-200">
+                  <span className="font-semibold text-gray-900">Total</span>
+                  <span className="text-lg font-bold text-gray-900">R {orderData.totalPrice}</span>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-center">
+                <h2 className="text-2xl font-bold text-gray-900">{finalDestination}</h2>
+                {finalStops.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-sm text-gray-600">via {finalStops.length} stop{finalStops.length > 1 ? 's' : ''}</p>
+                    <div className="text-xs text-gray-500 mt-1">
+                      {finalStops.map((stop, index) => (
+                        <span key={index}>
+                          {stop}{index < finalStops.length - 1 ? ' → ' : ''}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="flex items-center justify-center space-x-4 mt-4">
+                  <span className="text-lg font-medium text-gray-700">{finalCarType}</span>
+                  <span className="text-2xl font-bold text-gray-900">R {displayPrice}</span>
+                </div>
+                {priceCalculation && (
+                  <div className="text-sm text-gray-500 mt-2">
+                    {priceCalculation.totalDistance}km total distance
+                  </div>
+                )}
+              </div>
+            </>
+          )}
 
           <motion.button
             onClick={handleConfirmOrder}
@@ -151,11 +263,11 @@ export const ConfirmOrder: React.FC<ConfirmOrderProps> = ({
             whileTap={{ scale: 0.98 }}
             whileHover={{ scale: isLoading || isRideActive ? 1 : 1.02 }}
           >
-            {isLoading ? 'Processing...' : isRideActive ? 'Ride Active' : 'Confirm order'}
+            {isLoading ? 'Processing...' : isRideActive ? 'Order Active' : 'Confirm order'}
           </motion.button>
           {isRideActive && (
             <p className="text-gray-500 text-center text-sm mt-2">
-              You have an active ride
+              You have an active order
             </p>
           )}
         </div>

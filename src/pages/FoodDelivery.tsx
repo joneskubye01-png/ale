@@ -176,7 +176,29 @@ export function FoodDelivery() {
   };
 
   const handleSelectMode = () => {
-    console.log('Select mode clicked - final destination page');
+    if (!routeData) {
+      navigate('/shop');
+      return;
+    }
+
+    const selectedDeliveryMode = deliveryModes.find(m => m.id === selectedModeId);
+    if (!selectedDeliveryMode) return;
+
+    navigate('/confirm-order', {
+      state: {
+        orderType: 'food',
+        orderData: {
+          deliveryMode: selectedDeliveryMode,
+          pickupAddress: routeData.pickupLocation || 'Current Location',
+          destinationAddress: routeData.deliveryLocation || 'Destination',
+          stops: stops || [],
+          items: cart,
+          foodSubtotal: foodSubtotal,
+          deliveryFee: deliveryFee,
+          totalPrice: total
+        }
+      }
+    });
   };
 
   const handleCashClick = () => {
